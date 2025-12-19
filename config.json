@@ -1,0 +1,7 @@
+{
+    "repo": "testrepo",
+    "owner": "",
+    "cronSchedule": "",
+    "kvPath": "",
+    "clearKvOnStartup": ""
+}
