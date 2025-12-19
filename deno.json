@@ -1,0 +1,13 @@
+{
+  "tasks": {
+    "dev": "deno run --watch main.ts"
+  },
+  "imports": {
+    "@octokit/types": "npm:@octokit/types@^16.0.0",
+    "@std/assert": "jsr:@std/assert@1"
+  },
+  "unstable": ["cron", "kv"],
+  "fmt": {
+    "lineWidth": 120
+  }
+}
