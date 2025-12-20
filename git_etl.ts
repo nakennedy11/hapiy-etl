@@ -3,6 +3,7 @@ import { Octokit } from "npm:octokit";
 import { Endpoints } from "@octokit/types";
 import { SECOND } from "@std/datetime";
 import { CronExpressionParser } from "npm:cron-parser";
+import * as path from "@std/path";
 
 import configFile from "./config.json" with { type: "json" };
 
@@ -16,18 +17,24 @@ type CommitData = {
 };
 
 type RunOptions = {
-  repo: string | undefined;
-  owner: string | undefined;
-  cronSchedule: string | undefined;
-  kvPath: string | undefined;
-  clearKvOnStartup: string | undefined;
+  repo: string;
+  owner: string;
+  cronSchedule: string;
+  kvPath: string;
+  clearKvOnStartup: string;
+  useGithubToken: string;
 };
 
-async function getCommits(octokit: Octokit, timestamp?: Date): Promise<ListCommitsResponse> {
+async function getCommits(
+  octokit: Octokit,
+  repo: string,
+  owner: string,
+  timestamp?: Date,
+): Promise<ListCommitsResponse> {
   // use paginate to handle larger repo commit history datasets
   const data = await octokit.paginate("GET /repos/{owner}/{repo}/commits", {
-    owner: "nakennedy11",
-    repo: "cs4550hw01",
+    owner: owner,
+    repo: repo,
     since: timestamp?.toISOString(),
   });
 
@@ -70,15 +77,15 @@ function parseCommits(commits: ListCommitsResponse): CommitData[] {
   return parsedCommits;
 }
 
-async function storeCommits(kv: Deno.Kv, commits: CommitData[]): Promise<void> {
+async function storeCommits(kv: Deno.Kv, repo: string, commits: CommitData[]): Promise<void> {
   for (const commit of commits) {
     const key = commit.commitHash;
-    await kv.set(["commits", key], commit);
+    await kv.set([`commits/${repo}`, key], commit);
   }
 }
 
-async function getLatestCommitTimestamp(kv: Deno.Kv): Promise<Date | undefined> {
-  const commitIter = kv.list<CommitData>({ prefix: ["commits"] });
+async function getLatestCommitTimestamp(kv: Deno.Kv, repo: string): Promise<Date | undefined> {
+  const commitIter = kv.list<CommitData>({ prefix: [`commits/${repo}`] });
   let maxTimestamp: Date | undefined = undefined;
 
   for await (const commit of commitIter) {
@@ -91,34 +98,16 @@ async function getLatestCommitTimestamp(kv: Deno.Kv): Promise<Date | undefined> 
   return maxTimestamp;
 }
 
-async function main(commitKv: Deno.Kv, octokit: Octokit): Promise<void> {
-  let maxTs = await getLatestCommitTimestamp(commitKv);
-
-  if (maxTs) {
-    // increment maximum commit timestamp by 1 second to get only new commits
-    maxTs = new Date(maxTs.getTime() + SECOND);
-  }
-
-  const data = await getCommits(octokit, maxTs);
-
-  const testcommits: CommitData[] = parseCommits(data);
-  console.log(testcommits);
-
-  await storeCommits(commitKv, testcommits);
-}
-
 function readConfig(): RunOptions {
-
   // set default values of run options
+  // will get replaced if there is valid config file inputs
   let repo: string = "cs4550hw01";
   let owner: string = "nakennedy11";
   let cronSchedule: string = "* * * * *";
-  let kvPath: string = "./kv/commitHistory.sqlite";
+  let kvPath: string = ".commitHistory.sqlite";
   let clearKvOnStartup: string = "Y";
+  let useGithubToken: string = "N";
 
-  // validate inputs
-
-  // 
   // must have both repo/owner specified or both will use defaults
   if (configFile.owner && configFile.owner != "" && configFile.repo && configFile.repo != "") {
     owner = configFile.owner;
@@ -132,17 +121,35 @@ function readConfig(): RunOptions {
       cronSchedule = configFile.cronSchedule;
     } catch (err) {
       if (err instanceof Error) {
-        console.log("Error parsing cron expression:", err.message);
+        console.log("Error parsing cron expression, using default of 5 minutes:", err.message);
       }
     }
   }
 
   // filepath validation? should end in sqllite
-  
+  if (configFile.kvPath && configFile.kvPath != "") {
+    try {
+      path.parse(configFile.kvPath);
+      if (path.extname(configFile.kvPath) == ".sqlite") {
+        kvPath = configFile.kvPath;
+      } else {
+        console.log("Incorrect file extension for kvPath, using default of .commitHistory.sqlite");
+      }
+    } catch (err) {
+      if (err instanceof Error) {
+        console.log("Error parsing kvPath, using default of .commitHistory.sqlite:", err.message);
+      }
+    }
+  }
 
   // clearKvOnStartup should be Y or N
-  if (configFile.clearKvOnStartup && configFile.clearKvOnStartup in ["Y", "N"]) {
+  if (configFile.clearKvOnStartup &&  ["Y", "N"].includes(configFile.clearKvOnStartup)) {
     clearKvOnStartup = configFile.clearKvOnStartup;
+  }
+
+  // useGithubToken should be Y or N
+  if (configFile.useGithubToken && ["Y", "N"].includes(configFile.useGithubToken)) {
+    useGithubToken = configFile.useGithubToken;
   }
 
   return {
@@ -151,14 +158,62 @@ function readConfig(): RunOptions {
     cronSchedule: cronSchedule,
     kvPath: kvPath,
     clearKvOnStartup: clearKvOnStartup,
+    useGithubToken: useGithubToken,
   };
 }
 
-if (import.meta.main) {
-  const commitKv = await Deno.openKv(".commitHistory.sqlite"); // TODO: make configurable
-  const octokit = new Octokit();
+async function clearKvFiles(kvPath: string): Promise<void> {
+  console.log("Cleaning kv directory");
+  try {
+    await Deno.lstat(kvPath);
+    for await (const entry of Deno.readDir("./")) {
+      if (entry.isFile && entry.name.includes(".sqlite")) {
+        console.log(`Removing file: ${entry.name}`);
+        Deno.remove(`./${entry.name}`);
+      }
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      throw err;
+    }
+    console.log("Specified directory does not exist, nothing to clean up");
+  }
+}
 
-  Deno.cron("Run loop to get and store commit history", "* * * * *", async () => {
-    await main(commitKv, octokit);
+async function main(commitKv: Deno.Kv, octokit: Octokit, repo: string, owner: string): Promise<void> {
+  let maxTs = await getLatestCommitTimestamp(commitKv, repo);
+
+  if (maxTs) {
+    // increment maximum commit timestamp by 1 second to get only new commits
+    maxTs = new Date(maxTs.getTime() + SECOND);
+  }
+
+  const data = await getCommits(octokit, repo, owner, maxTs);
+
+  const testcommits: CommitData[] = parseCommits(data);
+  console.log(testcommits);
+
+  await storeCommits(commitKv, repo, testcommits);
+}
+
+if (import.meta.main) {
+  const options: RunOptions = readConfig();
+
+  if (options.clearKvOnStartup == "Y") {
+    await clearKvFiles(options.kvPath);
+  }
+
+  let token: string | undefined;
+
+  if (options.useGithubToken == "Y") {
+    token = Deno.env.get("GITHUB_PAT");
+  }
+
+  const octokit: Octokit = new Octokit({ auth: token });
+
+  const commitKv = await Deno.openKv(options.kvPath);
+
+  Deno.cron("Run loop to get and store commit history", options.cronSchedule, async () => {
+    await main(commitKv, octokit, options.repo, options.owner);
   });
 }

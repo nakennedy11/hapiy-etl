@@ -6,7 +6,9 @@
     "@octokit/types": "npm:@octokit/types@^16.0.0",
     "@std/assert": "jsr:@std/assert@1",
     "@std/datetime": "jsr:@std/datetime",
-    "cron-parser": "npm:cron-parser@^5.4.0"
+    "cron-parser": "npm:cron-parser@^5.4.0",
+    "@std/path": "jsr:@std/path",
+    "@std/fs/exists/": "jsr:@std/fs/exists/"
   },
   "unstable": ["cron", "kv"],
   "fmt": {
