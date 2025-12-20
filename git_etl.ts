@@ -2,6 +2,8 @@
 import { Octokit } from "npm:octokit";
 import { Endpoints } from "@octokit/types";
 import { SECOND } from "@std/datetime";
+import { CronExpressionParser } from "npm:cron-parser";
+
 import configFile from "./config.json" with { type: "json" };
 
 type ListCommitsResponse = Endpoints["GET /repos/{owner}/{repo}/commits"]["response"]["data"];
@@ -105,37 +107,58 @@ async function main(commitKv: Deno.Kv, octokit: Octokit): Promise<void> {
   await storeCommits(commitKv, testcommits);
 }
 
-
 function readConfig(): RunOptions {
-/*
-  repo: string | undefined;
-  owner: string | undefined;
-  cronSchedule: string | undefined;
-  kvPath: string | undefined;
-  clearKvOnStartup: string | undefined;
-*/
 
-// validate inputs 
-//cron schedule
+  // set default values of run options
+  let repo: string = "cs4550hw01";
+  let owner: string = "nakennedy11";
+  let cronSchedule: string = "* * * * *";
+  let kvPath: string = "./kv/commitHistory.sqlite";
+  let clearKvOnStartup: string = "Y";
 
-// repo/owner should both be strings
+  // validate inputs
 
-// filepath validation? should end in sqllite
+  // 
+  // must have both repo/owner specified or both will use defaults
+  if (configFile.owner && configFile.owner != "" && configFile.repo && configFile.repo != "") {
+    owner = configFile.owner;
+    repo = configFile.repo;
+  }
 
-// clearKvOnStartup should be Y or N 
+  // cron schedule, validate able to parse
+  if (configFile.cronSchedule && configFile.cronSchedule != "") {
+    try {
+      CronExpressionParser.parse(configFile.cronSchedule);
+      cronSchedule = configFile.cronSchedule;
+    } catch (err) {
+      if (err instanceof Error) {
+        console.log("Error parsing cron expression:", err.message);
+      }
+    }
+  }
 
+  // filepath validation? should end in sqllite
+  
 
+  // clearKvOnStartup should be Y or N
+  if (configFile.clearKvOnStartup && configFile.clearKvOnStartup in ["Y", "N"]) {
+    clearKvOnStartup = configFile.clearKvOnStartup;
+  }
 
+  return {
+    repo: repo,
+    owner: owner,
+    cronSchedule: cronSchedule,
+    kvPath: kvPath,
+    clearKvOnStartup: clearKvOnStartup,
+  };
 }
 
-
 if (import.meta.main) {
-  
   const commitKv = await Deno.openKv(".commitHistory.sqlite"); // TODO: make configurable
   const octokit = new Octokit();
 
   Deno.cron("Run loop to get and store commit history", "* * * * *", async () => {
     await main(commitKv, octokit);
   });
-  
 }

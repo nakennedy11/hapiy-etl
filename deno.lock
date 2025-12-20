@@ -5,6 +5,7 @@
     "jsr:@std/datetime@*": "0.225.5",
     "jsr:@std/internal@^1.0.12": "1.0.12",
     "npm:@octokit/types@16": "16.0.0",
+    "npm:cron-parser@^5.4.0": "5.4.0",
     "npm:octokit@*": "5.0.5_@octokit+core@7.0.6"
   },
   "jsr": {
@@ -223,8 +224,17 @@
     "bottleneck@2.19.5": {
       "integrity": "sha512-VHiNCbI1lKdl44tGrhNfU3lup0Tj/ZBMJB5/2ZbNXRCPuRCO7ed2mgcK4r17y+KB2EfuYuRaVlwNbAeaWGSpbw=="
     },
+    "cron-parser@5.4.0": {
+      "integrity": "sha512-HxYB8vTvnQFx4dLsZpGRa0uHp6X3qIzS3ZJgJ9v6l/5TJMgeWQbLkR5yiJ5hOxGbc9+jCADDnydIe15ReLZnJA==",
+      "dependencies": [
+        "luxon"
+      ]
+    },
     "fast-content-type-parse@3.0.0": {
       "integrity": "sha512-ZvLdcY8P+N8mGQJahJV5G4U88CSvT1rP8ApL6uETe88MBXrBHAkZlSEySdUlyztF7ccb+Znos3TFqaepHxdhBg=="
+    },
+    "luxon@3.7.2": {
+      "integrity": "sha512-vtEhXh/gNjI9Yg1u4jX/0YVPMvxzHuGgCm6tC5kZyb08yjGWGnqAjGJvcXbqQR2P3MyMEFnRbpcdFS6PBcLqew=="
     },
     "octokit@5.0.5_@octokit+core@7.0.6": {
       "integrity": "sha512-4+/OFSqOjoyULo7eN7EA97DE0Xydj/PW5aIckxqQIoFjFwqXKuFCvXUJObyJfBF9Khu4RL/jlDRI9FPaMGfPnw==",
@@ -256,7 +266,8 @@
     "dependencies": [
       "jsr:@std/assert@1",
       "jsr:@std/datetime@*",
-      "npm:@octokit/types@16"
+      "npm:@octokit/types@16",
+      "npm:cron-parser@^5.4.0"
     ]
   }
 }

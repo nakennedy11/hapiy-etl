@@ -5,7 +5,8 @@
   "imports": {
     "@octokit/types": "npm:@octokit/types@^16.0.0",
     "@std/assert": "jsr:@std/assert@1",
-    "@std/datetime": "jsr:@std/datetime"
+    "@std/datetime": "jsr:@std/datetime",
+    "cron-parser": "npm:cron-parser@^5.4.0"
   },
   "unstable": ["cron", "kv"],
   "fmt": {
