@@ -9,6 +9,9 @@ import configFile from "./config.json" with { type: "json" };
 
 type ListCommitsResponse = Endpoints["GET /repos/{owner}/{repo}/commits"]["response"]["data"];
 
+/**
+ * Contains data from git commits to be stored
+ */
 type CommitData = {
   commitHash: string;
   commitTimestamp: Date | undefined;
@@ -16,6 +19,9 @@ type CommitData = {
   authorEmail: string | undefined;
 };
 
+/**
+ * Contains data for the various conifgurations that can be used for running the application
+ */
 type RunOptions = {
   repo: string;
   owner: string;
@@ -25,6 +31,15 @@ type RunOptions = {
   useGithubToken: string;
 };
 
+/**
+ * Retrieves a list of git commits from a specified GitHub repository, either historically or after a given timestamp
+ *
+ * @param octokit - the Octokit client used to make requests to the Github API
+ * @param repo - name of the GitHub repository to read commit information from
+ * @param owner - owner of the GitHub repository
+ * @param timestamp - optional - the minimum timestamp after which commits should be read
+ * @returns a ListCommitsResponse, an array of git commit information from the specified repo
+ */
 async function getCommits(
   octokit: Octokit,
   repo: string,
@@ -47,27 +62,37 @@ async function getCommits(
   return data;
 }
 
+/**
+ * Parses commit information returned by the GitHub API into the needed CommitData for storage
+ *
+ * @param commits - the List of commit information returned from the GitHub API
+ * @returns a list of CommitData objects containing limited and formatted information from the commits list
+ */
 function parseCommits(commits: ListCommitsResponse): CommitData[] {
   const parsedCommits: CommitData[] = [];
 
   for (const item of commits) {
-    let commit: CommitData | undefined = undefined;
+    let commit: CommitData | undefined;
+    let authorEmail: string | undefined;
+    let commitDate: Date | undefined;
 
-    if (item.commit.author && item.commit.author.date) {
-      commit = {
-        commitHash: item.sha,
-        commitTimestamp: new Date(item.commit.author.date),
-        commitMessage: item.commit.message,
-        authorEmail: item.commit.author.email,
-      };
-    } else {
-      commit = {
-        commitHash: item.sha,
-        commitTimestamp: undefined,
-        commitMessage: item.commit.message,
-        authorEmail: undefined,
-      };
+    if (item.commit.author) {
+      authorEmail = item.commit.author.email;
+
+      // grab date from either the author or committer field if it exists
+      if (item.commit.author.date) {
+        commitDate = new Date(item.commit.author.date);
+      } else if (item.commit.committer && item.commit.committer.date) {
+        commitDate = new Date(item.commit.committer.date);
+      }
     }
+
+    commit = {
+      commitHash: item.sha,
+      commitTimestamp: commitDate,
+      commitMessage: item.commit.message,
+      authorEmail: authorEmail,
+    };
 
     if (commit) {
       parsedCommits.push(commit);
@@ -77,6 +102,13 @@ function parseCommits(commits: ListCommitsResponse): CommitData[] {
   return parsedCommits;
 }
 
+/**
+ * Puts a list of CommitData objects into the given Deno KV store
+ *
+ * @param kv - the Deno KV instance to store commit information in
+ * @param repo - the name of the repo where the commits are from, used to separate commits by source in the KV instance
+ * @param commits - the list of commits to be stored in the given KV instance
+ */
 async function storeCommits(kv: Deno.Kv, repo: string, commits: CommitData[]): Promise<void> {
   for (const commit of commits) {
     const key = commit.commitHash;
@@ -84,9 +116,16 @@ async function storeCommits(kv: Deno.Kv, repo: string, commits: CommitData[]): P
   }
 }
 
+/**
+ * Retrieves the maximum timestamp of all commits from the given repo in the given KV instance
+ *
+ * @param kv - the Deno KV instance to search for timestamps
+ * @param repo - the source GitHub repository used to find commits under their specific prefix
+ * @returns a Date object of the maximum timestamp if found, else undefined if no max timestamp exists
+ */
 async function getLatestCommitTimestamp(kv: Deno.Kv, repo: string): Promise<Date | undefined> {
   const commitIter = kv.list<CommitData>({ prefix: [`commits/${repo}`] });
-  let maxTimestamp: Date | undefined = undefined;
+  let maxTimestamp: Date | undefined;
 
   for await (const commit of commitIter) {
     const timestamp: Date | undefined = commit.value.commitTimestamp;
@@ -98,6 +137,11 @@ async function getLatestCommitTimestamp(kv: Deno.Kv, repo: string): Promise<Date
   return maxTimestamp;
 }
 
+/**
+ * Reads and validates optional input from the config.json file
+ *
+ * @returns a RunOptions object containing either the valid options from config.json and/or the default values
+ */
 function readConfig(): RunOptions {
   // set default values of run options
   // will get replaced if there is valid config file inputs
@@ -143,13 +187,21 @@ function readConfig(): RunOptions {
   }
 
   // clearKvOnStartup should be Y or N
-  if (configFile.clearKvOnStartup &&  ["Y", "N"].includes(configFile.clearKvOnStartup)) {
-    clearKvOnStartup = configFile.clearKvOnStartup;
+  if (configFile.clearKvOnStartup) {
+    if (["Y", "N"].includes(configFile.clearKvOnStartup)) {
+      clearKvOnStartup = configFile.clearKvOnStartup;
+    } else {
+      console.log("clearKvOnStartup must be Y or N. Using default of N");
+    }
   }
 
   // useGithubToken should be Y or N
-  if (configFile.useGithubToken && ["Y", "N"].includes(configFile.useGithubToken)) {
-    useGithubToken = configFile.useGithubToken;
+  if (configFile.useGithubToken) {
+    if (["Y", "N"].includes(configFile.useGithubToken)) {
+      useGithubToken = configFile.useGithubToken;
+    } else {
+      console.log("useGithubToken must be Y or N. Using default of N");
+    }
   }
 
   return {
@@ -162,10 +214,17 @@ function readConfig(): RunOptions {
   };
 }
 
+/**
+ * Deletes all .sqlite files in a given directory if it exists to remove previous commit data
+ *
+ * @param kvPath - the path of kv store files to be potentially removed
+ */
 async function clearKvFiles(kvPath: string): Promise<void> {
   console.log("Cleaning kv directory");
   try {
+    // verify directory exists
     await Deno.lstat(kvPath);
+
     for await (const entry of Deno.readDir("./")) {
       if (entry.isFile && entry.name.includes(".sqlite")) {
         console.log(`Removing file: ${entry.name}`);
@@ -180,6 +239,14 @@ async function clearKvFiles(kvPath: string): Promise<void> {
   }
 }
 
+/**
+ * Main function to orchestrate logic of finding historical/new commit information and storing it
+ *
+ * @param commitKv - the Deno KV instance to store commit information in
+ * @param octokit - the Octokit instance to use for making requests to the GitHub API
+ * @param repo - the GitHub repository to retrieve commit information from
+ * @param owner - the owner of the GitHub repository
+ */
 async function main(commitKv: Deno.Kv, octokit: Octokit, repo: string, owner: string): Promise<void> {
   let maxTs = await getLatestCommitTimestamp(commitKv, repo);
 
@@ -190,10 +257,10 @@ async function main(commitKv: Deno.Kv, octokit: Octokit, repo: string, owner: st
 
   const data = await getCommits(octokit, repo, owner, maxTs);
 
-  const testcommits: CommitData[] = parseCommits(data);
-  console.log(testcommits);
+  const parsedCommits: CommitData[] = parseCommits(data);
+  console.log(parsedCommits);
 
-  await storeCommits(commitKv, repo, testcommits);
+  await storeCommits(commitKv, repo, parsedCommits);
 }
 
 if (import.meta.main) {
