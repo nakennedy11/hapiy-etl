@@ -262,7 +262,7 @@ function validateYNConfig(fieldName: string, defaultVal: boolean, configVal: unk
 function readConfig(): RunOptions {
   // set default values of run options
   const defaultRunOptions = {
-    repo: "cs4550hw01",
+    repo: "fx_firecast",
     owner: "nakennedy11",
     cronSchedule: "*/5 * * * *",
     kvFilename: ".commitHistory.sqlite",
