@@ -31,6 +31,11 @@ type RunOptions = {
   useGithubToken: string;
 };
 
+type RepoInfo = {
+  repo: string;
+  owner: string;
+};
+
 /**
  * Retrieves a list of git commits from a specified GitHub repository, either historically or after a given timestamp
  *
@@ -79,10 +84,15 @@ function parseCommits(commits: ListCommitsResponse): CommitData[] {
     if (item.commit.author) {
       authorEmail = item.commit.author.email;
 
-      // grab date from either the author or committer field if it exists
+      // pull date from either the author field if it exists
       if (item.commit.author.date) {
         commitDate = new Date(item.commit.author.date);
-      } else if (item.commit.committer && item.commit.committer.date) {
+      }
+    }
+
+    // try to pull date from committer field if not assigned from author field
+    if (!commitDate) {
+      if (item.commit.committer && item.commit.committer.date) {
         commitDate = new Date(item.commit.committer.date);
       }
     }
@@ -138,31 +148,46 @@ async function getLatestCommitTimestamp(kv: Deno.Kv, repo: string): Promise<Date
 }
 
 /**
- * Reads and validates optional input from the config.json file
+ * Validates the "repo" and "owner" config file options. Each must be present and valid for either to be used.
  *
- * @returns a RunOptions object containing either the valid options from config.json and/or the default values
+ * @param owner - the value of the "owner" field from the config file
+ * @param defaultOwner - the default value to be used if "owner" is not present or valid
+ * @param repo - the value of the "repo" field from the config file
+ * @param defaultRepo - the default value to be used if the "repo" field is not present or valid
+ * @returns a RepoInfo object containing the repo and owner strings
  */
-function readConfig(): RunOptions {
-  // set default values of run options
-  // will get replaced if there is valid config file inputs
-  let repo: string = "cs4550hw01";
-  let owner: string = "nakennedy11";
-  let cronSchedule: string = "* * * * *";
-  let kvPath: string = ".commitHistory.sqlite";
-  let clearKvOnStartup: string = "Y";
-  let useGithubToken: string = "N";
-
+function validateRepoConfig(owner: unknown, defaultOwner: string, repo: unknown, defaultRepo: string): RepoInfo {
   // must have both repo/owner specified or both will use defaults
-  if (configFile.owner && configFile.owner != "" && configFile.repo && configFile.repo != "") {
-    owner = configFile.owner;
-    repo = configFile.repo;
+  let repoInfo: RepoInfo;
+
+  if (owner && typeof owner === "string" && owner != "" && repo && typeof repo === "string" && repo != "") {
+    repoInfo = {
+      repo: repo,
+      owner: owner,
+    };
+  } else {
+    repoInfo = {
+      repo: defaultRepo,
+      owner: defaultOwner,
+    };
   }
 
+  return repoInfo;
+}
+
+/**
+ * Validates the "cronSchedule" config file option. Must be a string and parse-able as a Cron expression
+ *
+ * @param cronExp - the value of the "cronSchedule" field from the config file
+ * @param defaultCronExp - the default value to be used if "cronSchedule" is not present or is invalid
+ * @returns either the validated config file value or default value of a Cron expression as a string
+ */
+function validateCronConfig(cronExp: unknown, defaultCronExp: string): string {
   // cron schedule, validate able to parse
-  if (configFile.cronSchedule && configFile.cronSchedule != "") {
+  if (cronExp && typeof cronExp === "string" && cronExp != "") {
     try {
       CronExpressionParser.parse(configFile.cronSchedule);
-      cronSchedule = configFile.cronSchedule;
+      return cronExp;
     } catch (err) {
       if (err instanceof Error) {
         console.log("Error parsing cron expression, using default of 5 minutes:", err.message);
@@ -170,12 +195,23 @@ function readConfig(): RunOptions {
     }
   }
 
-  // filepath validation? should end in sqllite
-  if (configFile.kvPath && configFile.kvPath != "") {
+  return defaultCronExp;
+}
+
+/**
+ * Validates the "kvPath" config file option. Must be a string, parseable as a path, ending in .sqlite
+ *
+ * @param kvPath - the value of the "kvPath" field from the config file
+ * @param defaultKvPath - the default value to be used if kvPath does not exist or is invalid
+ * @returns either the validated kvPath config value or the passed default kvPath as a string
+ */
+function validateKvPathConfig(kvPath: unknown, defaultKvPath: string): string {
+  // filepath validation, should end in sqllite
+  if (kvPath && typeof kvPath === "string" && kvPath != "") {
     try {
       path.parse(configFile.kvPath);
       if (path.extname(configFile.kvPath) == ".sqlite") {
-        kvPath = configFile.kvPath;
+        return kvPath;
       } else {
         console.log("Incorrect file extension for kvPath, using default of .commitHistory.sqlite");
       }
@@ -186,32 +222,55 @@ function readConfig(): RunOptions {
     }
   }
 
-  // clearKvOnStartup should be Y or N
-  if (configFile.clearKvOnStartup) {
-    if (["Y", "N"].includes(configFile.clearKvOnStartup)) {
-      clearKvOnStartup = configFile.clearKvOnStartup;
-    } else {
-      console.log("clearKvOnStartup must be Y or N. Using default of N");
-    }
-  }
+  return defaultKvPath;
+}
 
-  // useGithubToken should be Y or N
-  if (configFile.useGithubToken) {
-    if (["Y", "N"].includes(configFile.useGithubToken)) {
-      useGithubToken = configFile.useGithubToken;
-    } else {
-      console.log("useGithubToken must be Y or N. Using default of N");
-    }
+/**
+ * Validates a config file option that can only be "Y" or "N" (i.e., clearKvOnStartup or useGithubToken)
+ *
+ * @param fieldName - the name of the config file field being validated
+ * @param defaultVal - the default value of either "Y" or "N" to be use if configVal is invalid
+ * @param configVal - the value of the given config file field
+ * @returns either the validated "Y" or "N" option from the config file or the passed default value
+ */
+function validateYNConfig(fieldName: string, defaultVal: string, configVal: unknown): string {
+  if (configVal && typeof configVal === "string" && ["Y", "N"].includes(configVal)) {
+    return configVal;
+  } else {
+    console.log(`${fieldName} must be Y or N. Using default of ${defaultVal}`);
+    return defaultVal;
   }
+}
 
-  return {
-    repo: repo,
-    owner: owner,
-    cronSchedule: cronSchedule,
-    kvPath: kvPath,
-    clearKvOnStartup: clearKvOnStartup,
-    useGithubToken: useGithubToken,
+/**
+ * Reads and validates optional input from the config.json file
+ *
+ * @returns a RunOptions object containing either the valid options from config.json and/or the default values
+ */
+function readConfig(): RunOptions {
+  // set default values of run options
+  const defaultRunOptions = {
+    repo: "cs4550hw01",
+    owner: "nakennedy11",
+    cronSchedule: "*/5 * * * *",
+    kvPath: ".commitHistory.sqlite",
+    clearKvOnStartup: "Y",
+    useGithubToken: "N",
   };
+
+  const runOptions = {
+    ...validateRepoConfig(configFile.owner, defaultRunOptions.owner, configFile.repo, defaultRunOptions.repo),
+    cronSchedule: validateCronConfig(configFile.cronSchedule, defaultRunOptions.cronSchedule),
+    kvPath: validateKvPathConfig(configFile.kvPath, defaultRunOptions.kvPath),
+    clearKvOnStartup: validateYNConfig(
+      "clearKvOnStartup",
+      defaultRunOptions.clearKvOnStartup,
+      configFile.clearKvOnStartup,
+    ),
+    useGithubToken: validateYNConfig("useGithubToken", defaultRunOptions.useGithubToken, configFile.useGithubToken),
+  };
+
+  return runOptions;
 }
 
 /**
