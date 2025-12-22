@@ -1,8 +1,8 @@
 {
-  "repo": "personal-site",
+  "repo": "fx_firecast",
   "owner": "nakennedy11",
-  "cronSchedule": "",
-  "kvPath": ".commits.sqlite",
-  "clearKvOnStartup": "N",
-  "useGithubToken": "N"
+  "cronSchedule": "* * * * *",
+  "kvFilename": "",
+  "clearKvOnStartup": true,
+  "useGithubToken": false
 }

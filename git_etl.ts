@@ -1,13 +1,15 @@
 // git api
-import { Octokit } from "npm:octokit";
+import { Octokit } from "octokit";
 import { Endpoints } from "@octokit/types";
 import { SECOND } from "@std/datetime";
-import { CronExpressionParser } from "npm:cron-parser";
+import { CronExpressionParser } from "cron-parser";
 import * as path from "@std/path";
 
 import configFile from "./config.json" with { type: "json" };
 
+const ListCommitsEndpoint = "GET /repos/{owner}/{repo}/commits" as const;
 type ListCommitsResponse = Endpoints["GET /repos/{owner}/{repo}/commits"]["response"]["data"];
+const GithubTokenEnvironmentVariableName = "GITHUB_PAT" as const;
 
 /**
  * Contains data from git commits to be stored
@@ -16,19 +18,7 @@ type CommitData = {
   commitHash: string;
   commitTimestamp: Date | undefined;
   commitMessage: string;
-  authorEmail: string | undefined;
-};
-
-/**
- * Contains data for the various conifgurations that can be used for running the application
- */
-type RunOptions = {
-  repo: string;
-  owner: string;
-  cronSchedule: string;
-  kvPath: string;
-  clearKvOnStartup: string;
-  useGithubToken: string;
+  commitEmail: string | undefined;
 };
 
 /**
@@ -38,6 +28,18 @@ type RepoInfo = {
   repo: string;
   owner: string;
 };
+
+/**
+ * Contains data for the various conifgurations that can be used for running the application
+ */
+type RunOptions =
+  & RepoInfo
+  & {
+    cronSchedule: string;
+    kvFilename: string;
+    clearKvOnStartup: boolean;
+    useGithubToken: boolean;
+  };
 
 /**
  * Retrieves a list of git commits from a specified GitHub repository, either historically or after a given timestamp
@@ -55,16 +57,17 @@ async function getCommits(
   timestamp?: Date,
 ): Promise<ListCommitsResponse> {
   // use paginate to handle larger repo commit history datasets
-  const data = await octokit.paginate("GET /repos/{owner}/{repo}/commits", {
+  const data = await octokit.paginate(ListCommitsEndpoint, {
     owner: owner,
     repo: repo,
     since: timestamp?.toISOString(),
+    per_page: 100,
   });
 
   if (timestamp) {
-    console.log(`${data.length} new commits found after timestamp ${timestamp}`);
+    console.info(`${data.length} new commits found after timestamp ${timestamp}`);
   } else {
-    console.log(`${data.length} new commits found for initial historical load`);
+    console.info(`${data.length} new commits found for initial historical load`);
   }
 
   return data;
@@ -81,11 +84,11 @@ function parseCommits(commits: ListCommitsResponse): CommitData[] {
 
   for (const item of commits) {
     //let commit: CommitData | undefined;
-    let authorEmail: string | undefined;
+    let commitEmail: string | undefined;
     let commitDate: Date | undefined;
 
     if (item.commit.author) {
-      authorEmail = item.commit.author.email;
+      commitEmail = item.commit.author.email;
 
       // pull date from either the author field if it exists
       if (item.commit.author.date) {
@@ -93,9 +96,10 @@ function parseCommits(commits: ListCommitsResponse): CommitData[] {
       }
     }
 
-    // try to pull date from committer field if not assigned from author field
+    // try to pull values from committer field if date was not assigned from author field
     if (!commitDate) {
       if (item.commit.committer && item.commit.committer.date) {
+        commitEmail = item.commit.committer.email;
         commitDate = new Date(item.commit.committer.date);
       }
     }
@@ -104,7 +108,7 @@ function parseCommits(commits: ListCommitsResponse): CommitData[] {
       commitHash: item.sha,
       commitTimestamp: commitDate,
       commitMessage: item.commit.message,
-      authorEmail: authorEmail,
+      commitEmail: commitEmail,
     };
 
     parsedCommits.push(commit);
@@ -134,7 +138,7 @@ async function storeCommits(kv: Deno.Kv, repo: string, commits: CommitData[]): P
  * @param repo - the source GitHub repository used to find commits under their specific prefix
  * @returns a Date object of the maximum timestamp if found, else undefined if no max timestamp exists
  */
-async function getLatestCommitTimestamp(kv: Deno.Kv, repo: string): Promise<Date | undefined> {
+async function getLatestStoredCommitTimestamp(kv: Deno.Kv, repo: string): Promise<Date | undefined> {
   const commitIter = kv.list<CommitData>({ prefix: [`commits/${repo}`] });
   let maxTimestamp: Date | undefined;
 
@@ -149,6 +153,20 @@ async function getLatestCommitTimestamp(kv: Deno.Kv, repo: string): Promise<Date
 }
 
 /**
+ * Identifies an unknown object as a string and confirms it is a non-empty value
+ *
+ * @param cfg - the object to validate as a non-empty string type
+ * @returns true if conditions for non-empty string are met, otherwise false
+ */
+function isNonEmptyConfigString(cfg: unknown): cfg is string {
+  if (cfg && typeof cfg === "string" && cfg !== "") {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Validates the "repo" and "owner" config file options. Each must be present and valid for either to be used.
  *
  * @param owner - the value of the "owner" field from the config file
@@ -158,22 +176,23 @@ async function getLatestCommitTimestamp(kv: Deno.Kv, repo: string): Promise<Date
  * @returns a RepoInfo object containing the repo and owner strings
  */
 function validateRepoConfig(owner: unknown, defaultOwner: string, repo: unknown, defaultRepo: string): RepoInfo {
-  // must have both repo/owner specified or both will use defaults
-  let repoInfo: RepoInfo;
+  const validOwner = isNonEmptyConfigString(owner);
+  const validRepo = isNonEmptyConfigString(repo);
 
-  if (owner && typeof owner === "string" && owner != "" && repo && typeof repo === "string" && repo != "") {
-    repoInfo = {
+  if (validOwner && validRepo) {
+    return {
       repo: repo,
       owner: owner,
     };
-  } else {
-    repoInfo = {
-      repo: defaultRepo,
-      owner: defaultOwner,
-    };
+    // must have both repo/owner specified
+  } else if ((validOwner && !validRepo) || (!validOwner && validRepo)) {
+    throw new Error("Both owner and repo must be specified and valid strings to use in config");
   }
 
-  return repoInfo;
+  return {
+    repo: defaultRepo,
+    owner: defaultOwner,
+  };
 }
 
 /**
@@ -183,47 +202,37 @@ function validateRepoConfig(owner: unknown, defaultOwner: string, repo: unknown,
  * @param defaultCronExp - the default value to be used if "cronSchedule" is not present or is invalid
  * @returns either the validated config file value or default value of a Cron expression as a string
  */
-function validateCronConfig(cronExp: unknown, defaultCronExp: string): string {
+function validateCronConfig(cronExpression: unknown, defaultCronExp: string): string {
   // cron schedule, validate able to parse
-  if (cronExp && typeof cronExp === "string" && cronExp != "") {
-    try {
-      CronExpressionParser.parse(configFile.cronSchedule);
-      return cronExp;
-    } catch (err) {
-      if (err instanceof Error) {
-        console.log("Error parsing cron expression, using default of 5 minutes:", err.message);
-      }
-    }
+  if (isNonEmptyConfigString(cronExpression)) {
+    CronExpressionParser.parse(configFile.cronSchedule);
+    return cronExpression;
   }
 
+  console.info(`Using default value for cronSchedule: ${defaultCronExp}`);
   return defaultCronExp;
 }
 
 /**
- * Validates the "kvPath" config file option. Must be a string, parseable as a path, ending in .sqlite
+ * Validates the "kvFilename" config file option. Must be a string, parseable as a path, ending in .sqlite
  *
- * @param kvPath - the value of the "kvPath" field from the config file
- * @param defaultKvPath - the default value to be used if kvPath does not exist or is invalid
- * @returns either the validated kvPath config value or the passed default kvPath as a string
+ * @param kvFilename - the value of the "kvFilename" field from the config file
+ * @param defaultkvFilename - the default value to be used if kvFilename does not exist or is invalid
+ * @returns either the validated kvFilename config value or the passed default kvFilename as a string
  */
-function validateKvPathConfig(kvPath: unknown, defaultKvPath: string): string {
+function validatekvFilenameConfig(kvFilename: unknown, defaultkvFilename: string): string {
   // filepath validation, should end in sqllite
-  if (kvPath && typeof kvPath === "string" && kvPath != "") {
-    try {
-      path.parse(configFile.kvPath);
-      if (path.extname(configFile.kvPath) == ".sqlite") {
-        return kvPath;
-      } else {
-        console.log("Incorrect file extension for kvPath, using default of .commitHistory.sqlite");
-      }
-    } catch (err) {
-      if (err instanceof Error) {
-        console.log("Error parsing kvPath, using default of .commitHistory.sqlite:", err.message);
-      }
+  if (isNonEmptyConfigString(kvFilename)) {
+    path.parse(configFile.kvFilename);
+    if (path.extname(configFile.kvFilename) === ".sqlite") {
+      return kvFilename;
+    } else {
+      throw new Error("Incorrect file extension for kvFilename, must end in .sqlite");
     }
   }
 
-  return defaultKvPath;
+  console.info(`Using default value for kvFilename: ${defaultkvFilename}`);
+  return defaultkvFilename;
 }
 
 /**
@@ -234,12 +243,14 @@ function validateKvPathConfig(kvPath: unknown, defaultKvPath: string): string {
  * @param configVal - the value of the given config file field
  * @returns either the validated "Y" or "N" option from the config file or the passed default value
  */
-function validateYNConfig(fieldName: string, defaultVal: string, configVal: unknown): string {
-  if (configVal && typeof configVal === "string" && ["Y", "N"].includes(configVal)) {
+function validateYNConfig(fieldName: string, defaultVal: boolean, configVal: unknown): boolean {
+  if (configVal === undefined) {
+    console.info(`Using default value for ${fieldName}: ${defaultVal}`);
+    return defaultVal;
+  } else if (typeof configVal === "boolean") {
     return configVal;
   } else {
-    console.log(`${fieldName} must be Y or N. Using default of ${defaultVal}`);
-    return defaultVal;
+    throw new Error(`${fieldName} must be a boolean value of true or false`);
   }
 }
 
@@ -254,15 +265,15 @@ function readConfig(): RunOptions {
     repo: "cs4550hw01",
     owner: "nakennedy11",
     cronSchedule: "*/5 * * * *",
-    kvPath: ".commitHistory.sqlite",
-    clearKvOnStartup: "Y",
-    useGithubToken: "N",
+    kvFilename: ".commitHistory.sqlite",
+    clearKvOnStartup: true,
+    useGithubToken: false,
   };
 
   const runOptions = {
     ...validateRepoConfig(configFile.owner, defaultRunOptions.owner, configFile.repo, defaultRunOptions.repo),
     cronSchedule: validateCronConfig(configFile.cronSchedule, defaultRunOptions.cronSchedule),
-    kvPath: validateKvPathConfig(configFile.kvPath, defaultRunOptions.kvPath),
+    kvFilename: validatekvFilenameConfig(configFile.kvFilename, defaultRunOptions.kvFilename),
     clearKvOnStartup: validateYNConfig(
       "clearKvOnStartup",
       defaultRunOptions.clearKvOnStartup,
@@ -277,25 +288,22 @@ function readConfig(): RunOptions {
 /**
  * Deletes all .sqlite files in a given directory if it exists to remove previous commit data
  *
- * @param kvPath - the path of kv store files to be potentially removed
+ * @param kvFilename - the name of kv store files to be potentially removed
  */
-async function clearKvFiles(kvPath: string): Promise<void> {
-  console.log("Cleaning kv directory");
+async function clearKvFiles(kvFilename: string): Promise<void> {
+  console.info("Cleaning kv directory");
   try {
-    // verify directory exists
-    await Deno.lstat(kvPath);
+    console.info(`Removing files with a prefix of ${kvFilename}`);
 
     for await (const entry of Deno.readDir("./")) {
-      if (entry.isFile && entry.name.includes(".sqlite")) {
-        console.log(`Removing file: ${entry.name}`);
-        Deno.remove(`./${entry.name}`);
+      if (entry.isFile && entry.name.includes(kvFilename)) {
+        console.info(`Removing file: ${entry.name}`);
+        await Deno.remove(`./${entry.name}`);
       }
     }
   } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) {
-      throw err;
-    }
-    console.log("Specified directory does not exist, nothing to clean up");
+    console.error("Error deleting sqlite files");
+    throw err;
   }
 }
 
@@ -308,17 +316,16 @@ async function clearKvFiles(kvPath: string): Promise<void> {
  * @param owner - the owner of the GitHub repository
  */
 async function main(commitKv: Deno.Kv, octokit: Octokit, repo: string, owner: string): Promise<void> {
-  let maxTs = await getLatestCommitTimestamp(commitKv, repo);
+  let maxTimestamp = await getLatestStoredCommitTimestamp(commitKv, repo);
 
-  if (maxTs) {
+  if (maxTimestamp) {
     // increment maximum commit timestamp by 1 second to get only new commits
-    maxTs = new Date(maxTs.getTime() + SECOND);
+    maxTimestamp = new Date(maxTimestamp.getTime() + SECOND);
   }
 
-  const data = await getCommits(octokit, repo, owner, maxTs);
+  const data = await getCommits(octokit, repo, owner, maxTimestamp);
 
   const parsedCommits: CommitData[] = parseCommits(data);
-  console.log(parsedCommits);
 
   await storeCommits(commitKv, repo, parsedCommits);
 }
@@ -326,19 +333,22 @@ async function main(commitKv: Deno.Kv, octokit: Octokit, repo: string, owner: st
 if (import.meta.main) {
   const options: RunOptions = readConfig();
 
-  if (options.clearKvOnStartup == "Y") {
-    await clearKvFiles(options.kvPath);
+  if (options.clearKvOnStartup) {
+    await clearKvFiles(options.kvFilename);
   }
 
   let token: string | undefined;
 
-  if (options.useGithubToken == "Y") {
-    token = Deno.env.get("GITHUB_PAT");
+  if (options.useGithubToken) {
+    token = Deno.env.get(GithubTokenEnvironmentVariableName);
   }
 
   const octokit: Octokit = new Octokit({ auth: token });
 
-  const commitKv = await Deno.openKv(options.kvPath);
+  const commitKv = await Deno.openKv(options.kvFilename);
+
+  // start initial run before waiting for the cron
+  await main(commitKv, octokit, options.repo, options.owner);
 
   Deno.cron("Run loop to get and store commit history", options.cronSchedule, async () => {
     await main(commitKv, octokit, options.repo, options.owner);
