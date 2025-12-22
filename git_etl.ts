@@ -31,6 +31,9 @@ type RunOptions = {
   useGithubToken: string;
 };
 
+/**
+ * Contains the repo and owner information for a GitHub repository
+ */
 type RepoInfo = {
   repo: string;
   owner: string;
