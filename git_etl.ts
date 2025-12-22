@@ -80,7 +80,7 @@ function parseCommits(commits: ListCommitsResponse): CommitData[] {
   const parsedCommits: CommitData[] = [];
 
   for (const item of commits) {
-    let commit: CommitData | undefined;
+    //let commit: CommitData | undefined;
     let authorEmail: string | undefined;
     let commitDate: Date | undefined;
 
@@ -100,16 +100,14 @@ function parseCommits(commits: ListCommitsResponse): CommitData[] {
       }
     }
 
-    commit = {
+    const commit = {
       commitHash: item.sha,
       commitTimestamp: commitDate,
       commitMessage: item.commit.message,
       authorEmail: authorEmail,
     };
 
-    if (commit) {
-      parsedCommits.push(commit);
-    }
+    parsedCommits.push(commit);
   }
 
   return parsedCommits;
